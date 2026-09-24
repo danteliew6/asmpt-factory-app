@@ -6,6 +6,7 @@ type Kpis = {
   defect_rate_pct: number | null;
   high_risk_tools: number;
   total_tools: number;
+  yield_available: boolean;
 };
 type WatchRow = {
   tool_id: string; site: string; tool_type: string;
@@ -62,12 +63,16 @@ function CommandView() {
       <div className="kpi-row">
         <div className="kpi">
           <div className="label">First-pass yield</div>
-          {kpis ? <div className="value">{kpis.first_pass_yield_pct?.toFixed(1)}%</div> : <div className="value skel" style={{ height: 34, width: 120 }} />}
-          <div className="sub">Fleet-wide, all sites · target 95%</div>
+          {!kpis ? <div className="value skel" style={{ height: 34, width: 120 }} />
+            : kpis.yield_available ? <div className="value">{kpis.first_pass_yield_pct?.toFixed(1)}%</div>
+            : <div className="value" style={{ fontSize: 20, color: "var(--ink-3)" }}>Restricted</div>}
+          <div className="sub">{kpis && !kpis.yield_available ? "Governed source — sign-in identity not entitled to site data" : "Fleet-wide, all sites · target 95%"}</div>
         </div>
         <div className="kpi warn">
           <div className="label">Scrap cost</div>
-          {kpis ? <div className="value warn">{fmtUSD(kpis.scrap_cost_usd)}</div> : <div className="value skel" style={{ height: 34, width: 120 }} />}
+          {!kpis ? <div className="value skel" style={{ height: 34, width: 120 }} />
+            : kpis.yield_available ? <div className="value warn">{fmtUSD(kpis.scrap_cost_usd)}</div>
+            : <div className="value" style={{ fontSize: 20, color: "var(--ink-3)" }}>Restricted</div>}
           <div className="sub">Cumulative cost of scrapped output</div>
         </div>
         <div className="kpi warn">
@@ -133,6 +138,8 @@ function CommandView() {
           <div className="card-body">
             {err ? null : !fpy ? (
               <div className="skel" style={{ height: 220 }} />
+            ) : fpy.length === 0 ? (
+              <div className="foot" style={{ padding: "24px 4px" }}>Yield by tool type is governed by site-level access; the current sign-in identity is not entitled to these rows.</div>
             ) : (
               <div className="bars">
                 {fpy.map((r, i) => (

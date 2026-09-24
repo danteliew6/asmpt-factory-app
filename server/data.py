@@ -1,27 +1,39 @@
-"""SQL warehouse data access for the Command view."""
-from functools import lru_cache
+"""SQL warehouse data access for the Command view.
+
+Queries run either as the viewing user (on-behalf-of, when the app forwards
+`x-forwarded-access-token`) or as the app service principal (fallback). Using
+the viewer's token means Unity Catalog row filters / column masks are enforced
+against the viewer's own entitlements — governance is respected, not bypassed.
+"""
 from databricks import sql
 from server.config import get_config, WAREHOUSE_ID, GOLD
 
 
-def _connect():
+def _host() -> str:
+    return get_config().host.replace("https://", "").replace("http://", "")
+
+
+def _connect(user_token: str | None = None):
+    http_path = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
+    if user_token:
+        return sql.connect(server_hostname=_host(), http_path=http_path, access_token=user_token)
     cfg = get_config()
     return sql.connect(
-        server_hostname=cfg.host.replace("https://", "").replace("http://", ""),
-        http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
+        server_hostname=_host(),
+        http_path=http_path,
         credentials_provider=lambda: cfg.authenticate,
     )
 
 
-def _run(query: str):
-    with _connect() as conn:
+def _run(query: str, user_token: str | None = None):
+    with _connect(user_token) as conn:
         with conn.cursor() as cur:
             cur.execute(query)
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def get_kpis() -> dict:
+def get_kpis(user_token: str | None = None) -> dict:
     """Overall first-pass yield %, total scrap $, and High-risk tool count."""
     row = _run(
         f"""
@@ -29,14 +41,16 @@ def get_kpis() -> dict:
                MEASURE(`Scrap Cost USD`)       AS scrap,
                MEASURE(`Defect Rate Pct`)      AS defect
         FROM {GOLD}.mv_manufacturing_kpis
-        """
+        """,
+        user_token,
     )[0]
     risk = _run(
         f"""
         SELECT risk_band, COUNT(*) AS n
         FROM {GOLD}.pm_predictions
         GROUP BY risk_band
-        """
+        """,
+        user_token,
     )
     bands = {r["risk_band"]: int(r["n"]) for r in risk}
     return {
@@ -47,10 +61,13 @@ def get_kpis() -> dict:
         "medium_risk_tools": bands.get("Medium", 0),
         "low_risk_tools": bands.get("Low", 0),
         "total_tools": sum(bands.values()),
+        # yield/scrap come from a row-filtered governed source; if the caller's
+        # entitlements return no rows, the measures are null -> mark restricted.
+        "yield_available": row["fpy"] is not None,
     }
 
 
-def get_watchlist(limit: int = 12) -> list:
+def get_watchlist(limit: int = 12, user_token: str | None = None) -> list:
     """Top tools by failure_risk_7d (the predictive-maintenance watchlist)."""
     rows = _run(
         f"""
@@ -64,7 +81,8 @@ def get_watchlist(limit: int = 12) -> list:
         FROM {GOLD}.pm_predictions
         ORDER BY failure_risk_7d DESC, avg_health_index ASC
         LIMIT {int(limit)}
-        """
+        """,
+        user_token,
     )
     for r in rows:
         r["failure_risk_7d"] = float(r["failure_risk_7d"]) if r["failure_risk_7d"] is not None else None
@@ -72,7 +90,7 @@ def get_watchlist(limit: int = 12) -> list:
     return rows
 
 
-def get_fpy_by_tool_type() -> list:
+def get_fpy_by_tool_type(user_token: str | None = None) -> list:
     """First-pass yield % by tool type (TCB should be lowest)."""
     rows = _run(
         f"""
@@ -82,7 +100,8 @@ def get_fpy_by_tool_type() -> list:
         FROM {GOLD}.mv_manufacturing_kpis
         GROUP BY ALL
         ORDER BY fpy ASC
-        """
+        """,
+        user_token,
     )
     for r in rows:
         r["fpy"] = float(r["fpy"]) if r["fpy"] is not None else None

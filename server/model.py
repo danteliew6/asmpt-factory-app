@@ -1,12 +1,27 @@
 """Live failure-risk scoring using the exported scikit-learn model."""
+import io
 import json
 import os
 import joblib
 import pandas as pd
-from server.config import MODEL_DIR
+from server.config import MODEL_DIR, get_config
 
 _model = None
 _features = None
+
+
+def _read_volume_file(path: str) -> bytes:
+    """Read a UC Volume file. Databricks Apps do NOT FUSE-mount /Volumes, so
+    use the SDK Files API (works with the app SP's READ VOLUME grant). Falls
+    back to a local filesystem read for local dev."""
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient(config=get_config())
+    resp = w.files.download(path)
+    return resp.contents.read()
 
 
 def load_model():
@@ -14,9 +29,10 @@ def load_model():
     global _model, _features
     if _model is not None:
         return
-    with open(os.path.join(MODEL_DIR, "pm_features.json")) as f:
-        _features = json.load(f)
-    _model = joblib.load(os.path.join(MODEL_DIR, "pm_model.pkl"))
+    feats_bytes = _read_volume_file(os.path.join(MODEL_DIR, "pm_features.json"))
+    _features = json.loads(feats_bytes.decode("utf-8"))
+    model_bytes = _read_volume_file(os.path.join(MODEL_DIR, "pm_model.pkl"))
+    _model = joblib.load(io.BytesIO(model_bytes))
 
 
 def is_ready() -> bool:
