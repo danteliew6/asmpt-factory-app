@@ -25,8 +25,16 @@ MODEL_DIR = os.getenv(
 IS_DATABRICKS_APP = bool(os.getenv("DATABRICKS_CLIENT_ID"))
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
 def get_config():
-    """Return a databricks.sdk Config that authenticates in either mode."""
+    """Return a cached databricks.sdk Config that authenticates in either mode.
+
+    Cached as a singleton so the SDK's in-process token cache is reused across
+    concurrent requests instead of re-authenticating on every connection.
+    """
     from databricks.sdk.core import Config
 
     if IS_DATABRICKS_APP:
