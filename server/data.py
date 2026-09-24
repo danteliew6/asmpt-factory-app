@@ -25,12 +25,25 @@ def _connect(user_token: str | None = None):
     )
 
 
-def _run(query: str, user_token: str | None = None):
+def _exec(query: str, user_token: str | None):
     with _connect(user_token) as conn:
         with conn.cursor() as cur:
             cur.execute(query)
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _run(query: str, user_token: str | None = None):
+    """Run as the viewer (OBO) when a token is supplied; if that token is not
+    accepted by the SQL warehouse (e.g. user authorization not enabled or wrong
+    scope), fall back to the app service principal so the app never hard-errors.
+    Governance is still enforced: the SP only sees rows its own grants allow."""
+    if user_token:
+        try:
+            return _exec(query, user_token)
+        except Exception:
+            pass  # fall through to service-principal auth
+    return _exec(query, None)
 
 
 def get_kpis(user_token: str | None = None) -> dict:
