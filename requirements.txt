@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+databricks-sdk
+databricks-sql-connector
+scikit-learn==1.7.2
+joblib
+pandas
+numpy
+pydantic
