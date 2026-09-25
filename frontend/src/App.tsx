@@ -279,22 +279,30 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
 
 /* ============================ GOVERNANCE VIEW ============================ */
 type GovSide = { available: boolean; identity?: string; bond_events_count?: number; sample?: { tool_id: string; site: string; customer_name: string }[]; error?: string; label: string };
+type SiteScope = { site: string; bonds: number; fpy: number | null };
 type Gov = {
   sp: GovSide;
   viewer: GovSide;
   mask: { available: boolean; rows: { tool_id: string; site: string; customer_name: string }[]; detail?: string | null };
+  site_scope: { total_bonds: number; sites: SiteScope[] };
 };
 
 function GovernanceView() {
   const [gov, setGov] = useState<Gov | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [active, setActive] = useState<"sp" | "viewer">("sp");
+  const [persona, setPersona] = useState<string>("Global");
 
   useEffect(() => {
     getJSON<Gov>("/api/governance").then(setGov).catch((e) => setErr(String(e.message || e)));
   }, []);
 
   const side = gov ? gov[active] : null;
+  const sites = gov?.site_scope.sites ?? [];
+  const personaBonds = persona === "Global" ? (gov?.site_scope.total_bonds ?? 0) : (sites.find((s) => s.site === persona)?.bonds ?? 0);
+  const personaFpy = persona === "Global"
+    ? null
+    : sites.find((s) => s.site === persona)?.fpy ?? null;
 
   return (
     <>
@@ -334,7 +342,12 @@ function GovernanceView() {
           </div>
           <div className="card-body" style={{ paddingTop: 4 }}>
             {!gov ? <div className="skel" style={{ height: 200 }} />
-              : !side?.available ? <div className="foot" style={{ padding: "18px 4px" }}>This identity cannot query the warehouse.{side?.error ? ` (${side.error})` : ""}</div>
+              : !side?.available ? (
+                <div className="empty-rows">
+                  <div style={{ fontWeight: 700, color: "var(--ink-2)", marginBottom: 4 }}>On-behalf-of sign-in required</div>
+                  Open the app in a signed-in browser session to run as yourself. The app forwards your token (scope <code>sql</code>) and Unity Catalog scopes rows to <b>your</b> entitlements — an admin / whitelisted user sees all sites.
+                </div>
+              )
               : (side.sample && side.sample.length > 0) ? (
                 <table>
                   <thead><tr><th>Tool</th><th>Site</th><th>Customer name</th></tr></thead>
@@ -370,6 +383,41 @@ function GovernanceView() {
           </div>
         </div>
       </div>
+      {/* Persona preview — reliable per-site scoping from governed gold aggregates */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-head">
+          <h2>Per-site scope — persona preview</h2>
+          <p className="msg">Illustrates the row scope <code>rf_site</code> grants a site operator. Sourced from governed gold aggregates; UC enforces the same scope per-identity on the raw table in production.</p>
+        </div>
+        <div className="card-body">
+          <div className="toggle-row" style={{ marginBottom: 14 }}>
+            <span className="toggle-label">Persona</span>
+            <div className="seg">
+              {["Global", ...sites.map((s) => s.site)].map((s) => (
+                <button key={s} className={`seg-btn ${persona === s ? "on" : ""}`} onClick={() => setPersona(s)}>{s}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 28, alignItems: "baseline", flexWrap: "wrap" }}>
+            <div>
+              <div className="label" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".8px", color: "var(--ink-3)", fontWeight: 700 }}>Bonds in scope</div>
+              <div style={{ fontSize: 30, fontWeight: 800 }}>{gov ? personaBonds.toLocaleString() : "—"}</div>
+            </div>
+            {personaFpy != null && (
+              <div>
+                <div className="label" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: ".8px", color: "var(--ink-3)", fontWeight: 700 }}>First-pass yield</div>
+                <div style={{ fontSize: 30, fontWeight: 800 }}>{personaFpy.toFixed(1)}%</div>
+              </div>
+            )}
+            <div className="foot" style={{ maxWidth: 380 }}>
+              {persona === "Global"
+                ? "A user in `admins` (or the app owner) sees every site."
+                : `A member of asmpt_${persona.toLowerCase().replace(/[^a-z]/g, "")} is scoped to ${persona} only.`}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="source">Live queries against Unity Catalog. Service principal = <span className="mono">{gov?.sp.identity || "app SP"}</span>; entitled viewer via on-behalf-of user auth.</div>
     </>
   );

@@ -6,10 +6,21 @@ the column mask `mask_customer` on customer_name hides customer IP unless the
 identity is in the `asmpt_ip_privileged` group. Both are enforced in Unity
 Catalog — the app cannot bypass them. We only READ; we never alter policy.
 """
-from server.config import SILVER
+from server.config import SILVER, GOLD
 from server.data import run_as
 
 _COUNT = f"SELECT COUNT(*) AS n FROM {SILVER}.bond_events"
+# Persona-preview: per-site scope illustrated from the NON-row-filtered gold
+# mart (always readable by the app SP). Shows what rows a site operator would be
+# scoped to; UC enforces this per-identity on the raw table in production.
+_SITE_SCOPE = f"""
+    SELECT site,
+           CAST(SUM(bonds) AS BIGINT)                     AS bonds,
+           ROUND(100.0*(SUM(bonds)-SUM(fails))/SUM(bonds),1) AS fpy
+    FROM {GOLD}.site_daily_kpis
+    GROUP BY site
+    ORDER BY site
+"""
 _SAMPLE = f"SELECT tool_id, site, customer_name FROM {SILVER}.bond_events ORDER BY tool_id LIMIT 6"
 _MASK = f"SELECT tool_id, site, customer_name FROM {SILVER}.dim_tool ORDER BY tool_id LIMIT 8"
 _WHOAMI = "SELECT current_user() AS u"
@@ -57,8 +68,19 @@ def governance_contrast(viewer_token: str | None, viewer_email: str | None) -> d
     except Exception as e:
         mask_rows, mask_available = [], str(e)
 
+    # Persona preview: per-site scope from the gold mart (reliable, always-on).
+    try:
+        site_rows = run_as(_SITE_SCOPE, None)
+        for r in site_rows:
+            r["bonds"] = int(r["bonds"]) if r["bonds"] is not None else 0
+            r["fpy"] = float(r["fpy"]) if r["fpy"] is not None else None
+        total = sum(r["bonds"] for r in site_rows)
+    except Exception:
+        site_rows, total = [], 0
+
     return {
         "sp": sp,
         "viewer": viewer,
         "mask": {"available": mask_available is True, "rows": mask_rows, "detail": None if mask_available is True else mask_available},
+        "site_scope": {"total_bonds": total, "sites": site_rows},
     }
