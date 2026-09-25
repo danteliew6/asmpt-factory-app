@@ -7,7 +7,7 @@ identity is in the `asmpt_ip_privileged` group. Both are enforced in Unity
 Catalog — the app cannot bypass them. We only READ; we never alter policy.
 """
 from server.config import SILVER, GOLD
-from server.data import run_as
+from server.data import run_many
 
 _COUNT = f"SELECT COUNT(*) AS n FROM {SILVER}.bond_events"
 # Persona-preview: per-site scope illustrated from the NON-row-filtered gold
@@ -26,57 +26,48 @@ _MASK = f"SELECT tool_id, site, customer_name FROM {SILVER}.dim_tool ORDER BY to
 _WHOAMI = "SELECT current_user() AS u"
 
 
-def _identity(user_token):
+def _side(user_token, extra=None):
+    """Run the governed queries under one identity on a single session. Returns
+    count + sample rows (+ any `extra` query results), or an error flag if the
+    identity can't query (e.g. no user scope / OBO sign-in required)."""
+    queries = [_WHOAMI, _COUNT, _SAMPLE] + (extra or [])
     try:
-        return run_as(_WHOAMI, user_token)[0]["u"]
-    except Exception:
-        return None
-
-
-def _side(user_token):
-    """Run the governed queries under one identity. Returns count + sample rows,
-    or an error flag if the identity can't query (e.g. no user scope)."""
-    try:
-        identity = _identity(user_token)
-        count = int(run_as(_COUNT, user_token)[0]["n"])
-        rows = run_as(_SAMPLE, user_token)
-        return {
+        res = run_many(queries, user_token)
+        out = {
             "available": True,
-            "identity": identity,
-            "bond_events_count": count,
-            "sample": rows,
+            "identity": res[0][0]["u"],
+            "bond_events_count": int(res[1][0]["n"]),
+            "sample": res[2],
         }
+        return out, res[3:]
     except Exception as e:
-        return {"available": False, "error": str(e)}
+        return {"available": False, "error": str(e)}, []
 
 
 def governance_contrast(viewer_token: str | None, viewer_email: str | None) -> dict:
-    sp = _side(None)  # app service principal
+    # App service principal side, plus the mask + site-scope queries on the same
+    # session (SP can read dim_tool and the gold mart).
+    sp, extra = _side(None, extra=[_MASK, _SITE_SCOPE])
     sp["label"] = "App service principal (restricted)"
 
     if viewer_token:
-        viewer = _side(viewer_token)
+        viewer, _ = _side(viewer_token)
     else:
         viewer = {"available": False, "error": "No forwarded viewer token (open the app in a browser session)."}
     viewer["label"] = f"You — {viewer_email}" if viewer_email else "You (entitled viewer)"
 
-    # Column mask: dim_tool is not row-filtered, so the SP can read it; customer_name
-    # is masked for BOTH identities (neither is in asmpt_ip_privileged).
-    try:
-        mask_rows = run_as(_MASK, None)
-        mask_available = True
-    except Exception as e:
-        mask_rows, mask_available = [], str(e)
+    # Column mask (dim_tool) — masked for BOTH identities (neither is in asmpt_ip_privileged).
+    if len(extra) >= 1:
+        mask_rows, mask_available = extra[0], True
+    else:
+        mask_rows, mask_available = [], "service principal could not read dim_tool"
 
     # Persona preview: per-site scope from the gold mart (reliable, always-on).
-    try:
-        site_rows = run_as(_SITE_SCOPE, None)
-        for r in site_rows:
-            r["bonds"] = int(r["bonds"]) if r["bonds"] is not None else 0
-            r["fpy"] = float(r["fpy"]) if r["fpy"] is not None else None
-        total = sum(r["bonds"] for r in site_rows)
-    except Exception:
-        site_rows, total = [], 0
+    site_rows = extra[1] if len(extra) >= 2 else []
+    for r in site_rows:
+        r["bonds"] = int(r["bonds"]) if r["bonds"] is not None else 0
+        r["fpy"] = float(r["fpy"]) if r["fpy"] is not None else None
+    total = sum(r["bonds"] for r in site_rows)
 
     return {
         "sp": sp,

@@ -38,6 +38,19 @@ def run_as(query: str, user_token: str | None = None):
     return _run(query, user_token)
 
 
+def run_many(queries: list[str], user_token: str | None = None) -> list[list]:
+    """Run several queries on a SINGLE connection (one session) as one identity.
+    Cuts governance-view latency by avoiding a session open per query."""
+    out = []
+    with _connect(user_token) as conn:
+        for q in queries:
+            with conn.cursor() as cur:
+                cur.execute(q)
+                cols = [c[0] for c in cur.description]
+                out.append([dict(zip(cols, r)) for r in cur.fetchall()])
+    return out
+
+
 def get_kpis() -> dict:
     """Overall first-pass yield %, total scrap $, and High-risk tool count.
 
