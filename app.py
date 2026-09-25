@@ -9,19 +9,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from server import data, model
-
-
-def _user_token(request: Request):
-    """The viewer's forwarded OAuth token, if the Apps proxy provides it.
-    Present -> queries run as the viewer (row filters honored per-user);
-    absent -> fall back to the app service principal."""
-    return request.headers.get("x-forwarded-access-token")
 
 log = logging.getLogger("asmpt")
 logging.basicConfig(level=logging.INFO)
@@ -44,27 +37,27 @@ app = FastAPI(title="ASMPT Intelligent Factory", lifespan=lifespan)
 
 # ---- Command view -------------------------------------------------------
 @app.get("/api/kpis")
-def kpis(request: Request):
+def kpis():
     try:
-        return data.get_kpis(_user_token(request))
+        return data.get_kpis()
     except Exception as e:
         log.exception("kpis failed")
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/api/watchlist")
-def watchlist(request: Request, limit: int = 12):
+def watchlist(limit: int = 12):
     try:
-        return data.get_watchlist(limit, _user_token(request))
+        return data.get_watchlist(limit)
     except Exception as e:
         log.exception("watchlist failed")
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/api/fpy-by-tool-type")
-def fpy_by_tool_type(request: Request):
+def fpy_by_tool_type():
     try:
-        return data.get_fpy_by_tool_type(_user_token(request))
+        return data.get_fpy_by_tool_type()
     except Exception as e:
         log.exception("fpy failed")
         raise HTTPException(status_code=502, detail=str(e))

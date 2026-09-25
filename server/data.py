@@ -1,86 +1,64 @@
 """SQL warehouse data access for the Command view.
 
-Queries run either as the viewing user (on-behalf-of, when the app forwards
-`x-forwarded-access-token`) or as the app service principal (fallback). Using
-the viewer's token means Unity Catalog row filters / column masks are enforced
-against the viewer's own entitlements — governance is respected, not bypassed.
+All queries read non-row-filtered gold tables, so they run as the app service
+principal (which holds SELECT on asmpt_gold). The row filter (rf_site) and
+column mask stay live on asmpt_silver.bond_events / the metric view / Genie —
+we simply source the app's KPI tiles from the plain gold marts instead.
 """
 from databricks import sql
 from server.config import get_config, WAREHOUSE_ID, GOLD
 
 
-def _host() -> str:
-    return get_config().host.replace("https://", "").replace("http://", "")
-
-
-def _connect(user_token: str | None = None):
-    http_path = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
-    if user_token:
-        return sql.connect(server_hostname=_host(), http_path=http_path, access_token=user_token)
+def _connect():
     cfg = get_config()
     return sql.connect(
-        server_hostname=_host(),
-        http_path=http_path,
+        server_hostname=cfg.host.replace("https://", "").replace("http://", ""),
+        http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
         credentials_provider=lambda: cfg.authenticate,
     )
 
 
-def _exec(query: str, user_token: str | None):
-    with _connect(user_token) as conn:
+def _run(query: str):
+    with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(query)
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def _run(query: str, user_token: str | None = None):
-    """Run as the viewer (OBO) when a token is supplied; if that token is not
-    accepted by the SQL warehouse (e.g. user authorization not enabled or wrong
-    scope), fall back to the app service principal so the app never hard-errors.
-    Governance is still enforced: the SP only sees rows its own grants allow."""
-    if user_token:
-        try:
-            return _exec(query, user_token)
-        except Exception:
-            pass  # fall through to service-principal auth
-    return _exec(query, None)
+def get_kpis() -> dict:
+    """Overall first-pass yield %, total scrap $, and High-risk tool count.
 
-
-def get_kpis(user_token: str | None = None) -> dict:
-    """Overall first-pass yield %, total scrap $, and High-risk tool count."""
+    Yield/scrap come from the non-row-filtered gold mart site_daily_kpis; the
+    High-risk count comes from pm_predictions.
+    """
     row = _run(
         f"""
-        SELECT MEASURE(`First Pass Yield Pct`) AS fpy,
-               MEASURE(`Scrap Cost USD`)       AS scrap,
-               MEASURE(`Defect Rate Pct`)      AS defect
-        FROM {GOLD}.mv_manufacturing_kpis
-        """,
-        user_token,
+        SELECT 100.0 * (SUM(bonds) - SUM(fails)) / SUM(bonds) AS fpy,
+               SUM(scrap_cost_usd)                            AS scrap
+        FROM {GOLD}.site_daily_kpis
+        """
     )[0]
     risk = _run(
         f"""
         SELECT risk_band, COUNT(*) AS n
         FROM {GOLD}.pm_predictions
         GROUP BY risk_band
-        """,
-        user_token,
+        """
     )
     bands = {r["risk_band"]: int(r["n"]) for r in risk}
     return {
         "first_pass_yield_pct": float(row["fpy"]) if row["fpy"] is not None else None,
         "scrap_cost_usd": float(row["scrap"]) if row["scrap"] is not None else None,
-        "defect_rate_pct": float(row["defect"]) if row["defect"] is not None else None,
         "high_risk_tools": bands.get("High", 0),
         "medium_risk_tools": bands.get("Medium", 0),
         "low_risk_tools": bands.get("Low", 0),
         "total_tools": sum(bands.values()),
-        # yield/scrap come from a row-filtered governed source; if the caller's
-        # entitlements return no rows, the measures are null -> mark restricted.
         "yield_available": row["fpy"] is not None,
     }
 
 
-def get_watchlist(limit: int = 12, user_token: str | None = None) -> list:
+def get_watchlist(limit: int = 12) -> list:
     """Top tools by failure_risk_7d (the predictive-maintenance watchlist)."""
     rows = _run(
         f"""
@@ -94,8 +72,7 @@ def get_watchlist(limit: int = 12, user_token: str | None = None) -> list:
         FROM {GOLD}.pm_predictions
         ORDER BY failure_risk_7d DESC, avg_health_index ASC
         LIMIT {int(limit)}
-        """,
-        user_token,
+        """
     )
     for r in rows:
         r["failure_risk_7d"] = float(r["failure_risk_7d"]) if r["failure_risk_7d"] is not None else None
@@ -103,18 +80,18 @@ def get_watchlist(limit: int = 12, user_token: str | None = None) -> list:
     return rows
 
 
-def get_fpy_by_tool_type(user_token: str | None = None) -> list:
-    """First-pass yield % by tool type (TCB should be lowest)."""
+def get_fpy_by_tool_type() -> list:
+    """First-pass yield % by tool type from the non-row-filtered tool_health_daily
+    mart (TCB Bonder is lowest)."""
     rows = _run(
         f"""
-        SELECT `Tool Type` AS tool_type,
-               MEASURE(`First Pass Yield Pct`) AS fpy,
-               MEASURE(`Scrap Cost USD`)       AS scrap
-        FROM {GOLD}.mv_manufacturing_kpis
-        GROUP BY ALL
+        SELECT tool_type,
+               100.0 * (SUM(bonds) - SUM(fails)) / SUM(bonds) AS fpy,
+               SUM(scrap_cost_usd)                            AS scrap
+        FROM {GOLD}.tool_health_daily
+        GROUP BY tool_type
         ORDER BY fpy ASC
-        """,
-        user_token,
+        """
     )
     for r in rows:
         r["fpy"] = float(r["fpy"]) if r["fpy"] is not None else None
