@@ -9,12 +9,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from server import data, model
+from server import data, model, governance
 
 log = logging.getLogger("asmpt")
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +117,18 @@ def score(req: ScoreRequest):
     except Exception as e:
         log.exception("score failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- Unity Catalog governance (FGAC live demo) -------------------------
+@app.get("/api/governance")
+def governance_view(request: Request):
+    token = request.headers.get("x-forwarded-access-token")
+    email = request.headers.get("x-forwarded-email") or request.headers.get("x-forwarded-user")
+    try:
+        return governance.governance_contrast(token, email)
+    except Exception as e:
+        log.exception("governance failed")
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/api/health")

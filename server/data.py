@@ -9,21 +9,33 @@ from databricks import sql
 from server.config import get_config, WAREHOUSE_ID, GOLD
 
 
-def _connect():
+def _connect(user_token: str | None = None):
+    http_path = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
+    if user_token:
+        # On-behalf-of: run as the signed-in viewer (needs the app's `sql` user scope).
+        host = get_config().host.replace("https://", "").replace("http://", "")
+        return sql.connect(server_hostname=host, http_path=http_path, access_token=user_token)
     cfg = get_config()
     return sql.connect(
         server_hostname=cfg.host.replace("https://", "").replace("http://", ""),
-        http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
+        http_path=http_path,
         credentials_provider=lambda: cfg.authenticate,
     )
 
 
-def _run(query: str):
-    with _connect() as conn:
+def _run(query: str, user_token: str | None = None):
+    with _connect(user_token) as conn:
         with conn.cursor() as cur:
             cur.execute(query)
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def run_as(query: str, user_token: str | None = None):
+    """Public runner: pass a viewer token to query on-behalf-of the viewer,
+    or None to query as the app service principal. Used by the governance view
+    to contrast the two identities against Unity Catalog FGAC."""
+    return _run(query, user_token)
 
 
 def get_kpis() -> dict:

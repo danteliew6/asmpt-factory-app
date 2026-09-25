@@ -277,9 +277,120 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return r.json();
 }
 
+/* ============================ GOVERNANCE VIEW ============================ */
+type GovSide = { available: boolean; identity?: string; bond_events_count?: number; sample?: { tool_id: string; site: string; customer_name: string }[]; error?: string; label: string };
+type Gov = {
+  sp: GovSide;
+  viewer: GovSide;
+  mask: { available: boolean; rows: { tool_id: string; site: string; customer_name: string }[]; detail?: string | null };
+};
+
+function GovernanceView() {
+  const [gov, setGov] = useState<Gov | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [active, setActive] = useState<"sp" | "viewer">("sp");
+
+  useEffect(() => {
+    getJSON<Gov>("/api/governance").then(setGov).catch((e) => setErr(String(e.message || e)));
+  }, []);
+
+  const side = gov ? gov[active] : null;
+
+  return (
+    <>
+      <div className="view-head">
+        <h1>Unity Catalog Governance — fine-grained access control, live</h1>
+        <p>The same governed tables, seen through two identities. Row-level and column-level policies are enforced by Unity Catalog; the app cannot bypass them.</p>
+      </div>
+
+      <div className="gov-banner">
+        <b>How this is enforced</b>
+        Row filter <code>rf_site</code> scopes rows by the signed-in identity; column mask <code>mask_customer</code> hides customer IP unless the identity is in the <code>asmpt_ip_privileged</code> group. Both are enforced in Unity Catalog — the app cannot see past them.
+      </div>
+
+      {err && <div className="err">Could not load governance data: {err}</div>}
+
+      {/* View-as toggle */}
+      <div className="toggle-row">
+        <span className="toggle-label">View as</span>
+        <div className="seg">
+          <button className={`seg-btn ${active === "sp" ? "on" : ""}`} onClick={() => setActive("sp")}>App service principal <em>(restricted)</em></button>
+          <button className={`seg-btn ${active === "viewer" ? "on" : ""}`} onClick={() => setActive("viewer")}>You <em>(entitled viewer)</em></button>
+        </div>
+      </div>
+
+      {/* Row-filter contrast: both counts side by side */}
+      <div className="kpi-row" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <GovCount side={gov?.sp} active={active === "sp"} onClick={() => setActive("sp")} />
+        <GovCount side={gov?.viewer} active={active === "viewer"} onClick={() => setActive("viewer")} />
+      </div>
+
+      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        {/* Selected identity's bond_events sample (row filter) */}
+        <div className="card">
+          <div className="card-head">
+            <h2>Rows visible to: {side?.label ?? "…"}</h2>
+            <p className="msg">Row filter <code>rf_site</code> on <code>asmpt_silver.bond_events</code>. Identity: <span className="mono">{side?.identity || "—"}</span></p>
+          </div>
+          <div className="card-body" style={{ paddingTop: 4 }}>
+            {!gov ? <div className="skel" style={{ height: 200 }} />
+              : !side?.available ? <div className="foot" style={{ padding: "18px 4px" }}>This identity cannot query the warehouse.{side?.error ? ` (${side.error})` : ""}</div>
+              : (side.sample && side.sample.length > 0) ? (
+                <table>
+                  <thead><tr><th>Tool</th><th>Site</th><th>Customer name</th></tr></thead>
+                  <tbody>{side.sample.map((r, i) => (
+                    <tr key={i}><td className="mono">{r.tool_id}</td><td>{r.site}</td><td className="masked">{r.customer_name}</td></tr>
+                  ))}</tbody>
+                </table>
+              ) : (
+                <div className="empty-rows">
+                  <div className="big-zero">0 rows</div>
+                  No site entitlement — <code>rf_site</code> returns nothing for this identity.
+                </div>
+              )}
+          </div>
+        </div>
+
+        {/* Column mask (active under both identities) */}
+        <div className="card">
+          <div className="card-head">
+            <h2>Column mask — always active</h2>
+            <p className="msg">Mask <code>mask_customer</code> on <code>asmpt_silver.dim_tool</code>. Masked for <b>both</b> identities (neither is in <code>asmpt_ip_privileged</code>).</p>
+          </div>
+          <div className="card-body" style={{ paddingTop: 4 }}>
+            {!gov ? <div className="skel" style={{ height: 200 }} />
+              : gov.mask.available ? (
+                <table>
+                  <thead><tr><th>Tool</th><th>Site</th><th>Customer name</th></tr></thead>
+                  <tbody>{gov.mask.rows.map((r, i) => (
+                    <tr key={i}><td className="mono">{r.tool_id}</td><td>{r.site}</td><td className="masked">{r.customer_name}</td></tr>
+                  ))}</tbody>
+                </table>
+              ) : <div className="foot">{gov.mask.detail}</div>}
+          </div>
+        </div>
+      </div>
+      <div className="source">Live queries against Unity Catalog. Service principal = <span className="mono">{gov?.sp.identity || "app SP"}</span>; entitled viewer via on-behalf-of user auth.</div>
+    </>
+  );
+}
+
+function GovCount({ side, active, onClick }: { side?: GovSide; active: boolean; onClick: () => void }) {
+  const restricted = side && side.available && (side.bond_events_count ?? 0) === 0;
+  return (
+    <div className={`kpi gov-count ${active ? "sel" : ""} ${restricted ? "warn" : ""}`} onClick={onClick} style={{ cursor: "pointer" }}>
+      <div className="label">{side?.label ?? "…"}</div>
+      {!side ? <div className="value skel" style={{ height: 34, width: 120 }} />
+        : !side.available ? <div className="value" style={{ fontSize: 18, color: "var(--ink-3)" }}>No SQL access</div>
+        : <div className={`value ${restricted ? "warn" : ""}`}>{(side.bond_events_count ?? 0).toLocaleString()}</div>}
+      <div className="sub">rows of <code>bond_events</code> visible · via <code>rf_site</code></div>
+    </div>
+  );
+}
+
 /* ============================ SHELL ============================ */
 export default function App() {
-  const [tab, setTab] = useState<"command" | "sim">("command");
+  const [tab, setTab] = useState<"command" | "sim" | "gov">("command");
   return (
     <div className="shell">
       <div className="topbar">
@@ -290,12 +401,13 @@ export default function App() {
         <div className="tabs">
           <button className={`tab ${tab === "command" ? "active" : ""}`} onClick={() => setTab("command")}>Command</button>
           <button className={`tab ${tab === "sim" ? "active" : ""}`} onClick={() => setTab("sim")}>Failure-risk simulator</button>
+          <button className={`tab ${tab === "gov" ? "active" : ""}`} onClick={() => setTab("gov")}>Unity Catalog governance</button>
         </div>
         <div className="spacer" />
         <div className="env-pill">dante_classic_stable_catalog · asmpt_gold</div>
       </div>
       <div className="main">
-        {tab === "command" ? <CommandView /> : <SimulatorView />}
+        {tab === "command" ? <CommandView /> : tab === "sim" ? <SimulatorView /> : <GovernanceView />}
       </div>
     </div>
   );
